@@ -1,0 +1,90 @@
+:root {
+  --bg-primary: #fdfcf9;
+  --bg-secondary: #f4f1ea;
+  --bg-elevated: #ffffff;
+  --text-primary: #1b1b1f;
+  --text-secondary: #4b4b55;
+  --accent: #ff6a3d;
+  --accent-strong: #ff4f19;
+  --accent-soft: #ffe1d6;
+  --border: #e7dfd3;
+  --shadow-sm: 0 6px 16px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 20px 50px rgba(16, 24, 40, 0.12);
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+}
+
+[data-theme='dark'] {
+  --bg-primary: #0f1218;
+  --bg-secondary: #161b24;
+  --bg-elevated: #1b2230;
+  --text-primary: #f8fafc;
+  --text-secondary: #aab3c2;
+  --accent: #ff8a5b;
+  --accent-strong: #ff6a3d;
+  --accent-soft: rgba(255, 138, 91, 0.18);
+  --border: #253047;
+  --shadow-sm: 0 6px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Space Grotesk', system-ui, -apple-system, Segoe UI, sans-serif;
+  background: radial-gradient(circle at 10% 20%, rgba(255, 176, 133, 0.25), transparent 35%),
+              radial-gradient(circle at 90% 10%, rgba(102, 150, 255, 0.2), transparent 40%),
+              var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
+  min-height: 100vh;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: linear-gradient(120deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0));
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: -1;
+}
+
+body[data-theme='dark']::before,
+[data-theme='dark'] body::before {
+  background-image: linear-gradient(120deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0));
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(12px);
+}
+
+button, input, select, textarea {
+  font-family: inherit;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(255, 106, 61, 0.0); }
+  50% { box-shadow: 0 0 20px rgba(255, 106, 61, 0.25); }
+}

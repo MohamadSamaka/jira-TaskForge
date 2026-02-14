@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskforge"
+version = "1.0.0"
+description = "Local-first Jira assistant with deterministic queries and local AI"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [{name = "TaskForge"}]
+
+dependencies = [
+    "typer[all]>=0.9.0",
+    "httpx>=0.25.0",
+    "groq>=1.0.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+hf = [
+    "llama-cpp-python>=0.2.0",
+]
+gui = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+]
+
+[project.scripts]
+jira-assist = "taskforge.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

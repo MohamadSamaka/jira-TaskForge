@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  taskforge:
+    build: .
+    container_name: taskforge
+    env_file:
+      - .env
+    volumes:
+      # Persist data and output on the host
+      - ./data:/home/taskforge/app/data
+      - ./out:/home/taskforge/app/out
+      # Mount .env for runtime config
+      - ./.env:/home/taskforge/app/.env:ro
+    ports:
+      - "8765:8765"
+    # Network for communicating with host Ollama
+    network_mode: host
+    # Default to running the GUI
+    command: [ "gui", "--host", "0.0.0.0" ]
