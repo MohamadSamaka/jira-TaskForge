@@ -4,7 +4,7 @@ import { IssueList } from './components/IssueList';
 import { IssueTree } from './components/IssueTree';
 import { IssueDetail } from './components/IssueDetail';
 import { FocusView } from './components/FocusView';
-import { GraphView } from './components/GraphView';
+import { TaskGraphPanel } from './components/TaskGraphPanel';
 import { AIPanel } from './components/AIPanel';
 import { AdvisorPanel } from './components/AdvisorPanel';
 import { SearchBar } from './components/SearchBar';
@@ -406,10 +406,11 @@ function App() {
                             <FocusView issueKey={selectedId} onSelect={setSelectedId} />
                         )}
                         {rightView === 'graph' && (
-                            <GraphView
+                            <TaskGraphPanel
+                                focusData={focusData}
                                 focusKey={selectedId}
-                                data={focusData}
-                                onSelect={(nodeId) => setSelectedId(nodeId)}
+                                onSelectIssue={(nodeId) => setSelectedId(nodeId)}
+                                onRefocus={loadFocusData}
                             />
                         )}
                         {rightView === 'ai' && (

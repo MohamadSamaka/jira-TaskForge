@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactFlow, {
     useNodesState,
     useEdgesState,
@@ -7,20 +7,18 @@ import ReactFlow, {
     Background,
     MarkerType,
     Handle,
-    Position
+    Position,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from 'dagre';
 import { useTheme } from '../hooks/useTheme';
 
-// Layout configuration
 const nodeWidth = 240;
 const nodeHeight = 120;
 
-const getLayoutedElements = (nodes, edges, direction = 'TB') => {
+function getLayoutedElements(nodes, edges, direction = 'TB') {
     const dagreGraph = new dagre.graphlib.Graph();
     dagreGraph.setDefaultEdgeLabel(() => ({}));
-
     dagreGraph.setGraph({ rankdir: direction, ranksep: 90, nodesep: 60 });
 
     nodes.forEach((node) => {
@@ -35,170 +33,209 @@ const getLayoutedElements = (nodes, edges, direction = 'TB') => {
 
     dagre.layout(dagreGraph);
 
-    nodes.forEach((node) => {
-        const nodeWithPosition = dagreGraph.node(node.id);
+    const positioned = nodes.map((node) => {
+        const pos = dagreGraph.node(node.id);
         const width = node.data?.layout?.width || nodeWidth;
         const height = node.data?.layout?.height || nodeHeight;
-        node.targetPosition = 'top';
-        node.sourcePosition = 'bottom';
-
-        // Shift position to center anchor
-        node.position = {
-            x: nodeWithPosition.x - width / 2,
-            y: nodeWithPosition.y - height / 2,
+        return {
+            ...node,
+            targetPosition: 'top',
+            sourcePosition: 'bottom',
+            position: {
+                x: (pos?.x || 0) - width / 2,
+                y: (pos?.y || 0) - height / 2,
+            },
         };
-
-        return node;
     });
 
-    return { nodes, edges };
-};
+    return { nodes: positioned, edges };
+}
 
-export function GraphView({ focusKey, data, onSelect }) {
+function normalizeNode(node) {
+    return {
+        id: node.id,
+        key: node.id,
+        summary: node.label || node.metadata?.title || '',
+        status: node.metadata?.status || '',
+        statusCategory: node.metadata?.statusCategory || '',
+        priority: node.metadata?.priority || '',
+        assignee: node.metadata?.assignee || '',
+        kind: node.kind || node.metadata?.type || 'issue',
+    };
+}
+
+function edgeDecoration(edge, isDark) {
+    if (edge.type === 'issue-link') {
+        return {
+            animated: true,
+            style: { stroke: '#f59e0b', strokeWidth: 2 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: '#f59e0b' },
+            label: edge.relation || edge.linkType || 'link',
+        };
+    }
+    if (edge.type === 'parent-child') {
+        return {
+            style: { stroke: '#3b82f6', strokeWidth: 2 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6' },
+            label: 'parent/child',
+        };
+    }
+    return {
+        style: { stroke: isDark ? '#475569' : '#94a3b8', strokeWidth: 2 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: isDark ? '#475569' : '#94a3b8' },
+        label: edge.type || '',
+    };
+}
+
+function focusToGraph(data) {
+    if (!data) return { nodes: [], edges: [] };
+    const { issue, parent, subtasks = [], siblings = [], linked = [] } = data;
+    if (!issue?.key) return { nodes: [], edges: [] };
+
+    const nodes = new Map();
+    const edges = [];
+    const put = (item, kind, labelOverride = null) => {
+        if (!item?.key || nodes.has(item.key)) return;
+        nodes.set(item.key, {
+            id: item.key,
+            key: item.key,
+            label: labelOverride || item.summary || '',
+            metadata: {
+                status: item.status || '',
+                statusCategory: item.statusCategory || '',
+                priority: item.priority || '',
+                assignee: item.assignee || '',
+                type: kind,
+            },
+            kind,
+        });
+    };
+
+    put(issue, 'focus');
+    if (parent) {
+        put(parent, 'parent');
+        edges.push({ from: parent.key, to: issue.key, type: 'parent-child' });
+        siblings.forEach((sib) => {
+            put(sib, 'sibling');
+            edges.push({ from: parent.key, to: sib.key, type: 'parent-child' });
+        });
+    }
+    subtasks.forEach((sub) => {
+        put(sub, 'subtask');
+        edges.push({ from: issue.key, to: sub.key, type: 'parent-child' });
+    });
+    linked.forEach((link) => {
+        const targetKey = link?.linked_key;
+        if (!targetKey) return;
+        put(link.full_issue || { key: targetKey, summary: link.linked_summary || 'Linked issue' }, 'linked');
+        const isOutward = link.direction === 'outward';
+        edges.push({
+            from: isOutward ? issue.key : targetKey,
+            to: isOutward ? targetKey : issue.key,
+            type: 'issue-link',
+            relation: link.relation || link.type,
+            linkType: link.type,
+        });
+    });
+
+    return { nodes: Array.from(nodes.values()), edges };
+}
+
+function toFlowGraph(graph, isDark, displayFields) {
+    const rfNodes = (graph?.nodes || []).map((node) => {
+        const normalized = normalizeNode(node);
+        const isFocus = normalized.kind === 'focus';
+        const layout = isFocus ? { width: 280, height: 130 } : { width: 240, height: 120 };
+        return {
+            id: normalized.id,
+            type: 'issue',
+            data: {
+                ...normalized,
+                layout,
+                displayFields,
+            },
+            position: { x: 0, y: 0 },
+            style: {
+                width: layout.width,
+                height: layout.height,
+            },
+        };
+    });
+
+    const rfEdges = (graph?.edges || []).map((edge, idx) => {
+        const visual = edgeDecoration(edge, isDark);
+        return {
+            id: edge.id || `e-${edge.from}-${edge.to}-${edge.type || idx}`,
+            source: edge.from,
+            target: edge.to,
+            type: 'smoothstep',
+            ...visual,
+            labelBgPadding: [6, 4],
+            labelBgBorderRadius: 6,
+        };
+    });
+    return getLayoutedElements(rfNodes, rfEdges);
+}
+
+export function GraphView({
+    data,
+    graph = null,
+    onSelect,
+    onSelectionChange,
+    selectedNodeIds = [],
+    displayFields = { status: true, assignee: true, priority: true },
+}) {
     const { isDark } = useTheme();
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+    const [stableFocusGraph, setStableFocusGraph] = useState({ nodes: [], edges: [] });
 
     const nodeTypes = useMemo(() => ({ issue: IssueNode }), []);
+    const liveFocusGraph = useMemo(() => focusToGraph(data), [data]);
+    const sourceGraph = graph || stableFocusGraph;
 
     useEffect(() => {
-        if (!data) return;
+        if (graph) return;
+        if ((liveFocusGraph.nodes || []).length === 0) return;
+        setStableFocusGraph(liveFocusGraph);
+    }, [graph, liveFocusGraph]);
 
-        const { issue, parent, subtasks, siblings, linked } = data;
-        const initialNodes = [];
-        const initialEdges = [];
-        const processed = new Set();
-
-        const addNode = (item, type, labelOverride = null) => {
-            if (!item || !item.key || processed.has(item.key)) return;
-            processed.add(item.key);
-
-            const summary = labelOverride || item.summary || '';
-            const status = item.status || '';
-            const statusCategory = item.statusCategory || '';
-            const priority = item.priority || '';
-            const assignee = item.assignee || '';
-
-            const layout = type === 'focus'
-                ? { width: 280, height: 130 }
-                : { width: 240, height: 120 };
-
-            initialNodes.push({
-                id: item.key,
-                type: 'issue',
-                data: {
-                    key: item.key,
-                    summary,
-                    status,
-                    statusCategory,
-                    priority,
-                    assignee,
-                    kind: type,
-                    layout
-                },
-                position: { x: 0, y: 0 }, // layout will fix this
-                style: {
-                    width: layout.width,
-                    height: layout.height
-                }
-            });
-        };
-
-        // 1. Focus Node
-        addNode(issue, 'focus');
-
-        // 2. Parent
-        if (parent) {
-            addNode(parent, 'parent');
-            initialEdges.push({
-                id: `e-${parent.key}-${issue.key}`,
-                source: parent.key,
-                target: issue.key,
-                type: 'smoothstep',
-                markerEnd: { type: MarkerType.ArrowClosed, color: '#10b981' },
-                style: { stroke: '#10b981', strokeWidth: 2 },
-                label: 'parent',
-                labelBgPadding: [6, 4],
-                labelBgBorderRadius: 6
-            });
-
-            // Siblings attached to parent
-            if (siblings) {
-                siblings.forEach(sib => {
-                    addNode(sib, 'sibling');
-                    initialEdges.push({
-                        id: `e-${parent.key}-${sib.key}`,
-                        source: parent.key,
-                        target: sib.key,
-                        type: 'smoothstep',
-                        markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' },
-                        style: { stroke: '#94a3b8' },
-                        label: 'sibling',
-                        labelBgPadding: [6, 4],
-                        labelBgBorderRadius: 6
-                    });
-                });
-            }
-        }
-
-        // 3. Subtasks
-        if (subtasks) {
-            subtasks.forEach(sub => {
-                addNode(sub, 'subtask');
-                initialEdges.push({
-                    id: `e-${issue.key}-${sub.key}`,
-                    source: issue.key,
-                    target: sub.key,
-                    type: 'smoothstep',
-                    label: 'subtask',
-                    markerEnd: { type: MarkerType.ArrowClosed, color: '#3b82f6' },
-                    style: { stroke: '#3b82f6' },
-                    labelBgPadding: [6, 4],
-                    labelBgBorderRadius: 6
-                });
-            });
-        }
-
-        // 4. Linked
-        if (linked) {
-            linked.forEach(link => {
-                const targetKey = link.linked_key;
-                if (!processed.has(targetKey)) {
-                    addNode(link.full_issue || { key: targetKey, summary: 'External' }, 'linked');
-                }
-
-                // Link logic
-                const isOutward = link.direction === 'outward';
-                const source = isOutward ? issue.key : targetKey;
-                const target = isOutward ? targetKey : issue.key;
-
-                initialEdges.push({
-                    id: `e-${source}-${target}-${link.type}`,
-                    source: source,
-                    target: target,
-                    animated: true,
-                    label: link.type,
-                    style: { stroke: '#f59e0b', strokeWidth: 2 },
-                    markerEnd: { type: MarkerType.ArrowClosed, color: '#f59e0b' },
-                    labelBgPadding: [6, 4],
-                    labelBgBorderRadius: 6
-                });
-            });
-        }
-
-        const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-            initialNodes,
-            initialEdges
+    useEffect(() => {
+        const { nodes: layoutedNodes, edges: layoutedEdges } = toFlowGraph(
+            sourceGraph,
+            isDark,
+            displayFields,
         );
-
         setNodes(layoutedNodes);
         setEdges(layoutedEdges);
+    }, [sourceGraph, isDark, setNodes, setEdges, displayFields]);
 
-    }, [data, isDark, setNodes, setEdges]); // re-run on data change
+    useEffect(() => {
+        const selected = new Set((selectedNodeIds || []).map((id) => id.toUpperCase()));
+        setNodes((prevNodes) =>
+            prevNodes.map((node) => {
+                const shouldSelect = selected.has((node.id || '').toUpperCase());
+                if (Boolean(node.selected) === shouldSelect) return node;
+                return { ...node, selected: shouldSelect };
+            }),
+        );
+    }, [selectedNodeIds, setNodes]);
 
-    const onNodeClick = useCallback((event, node) => {
-        if (onSelect) onSelect(node.id);
-    }, [onSelect]);
+    const onNodeClick = useCallback(
+        (event, node) => {
+            if (onSelect) onSelect(node.id);
+        },
+        [onSelect],
+    );
+
+    const onInternalSelectionChange = useCallback(
+        (params = {}) => {
+            const selectedNodes = params.nodes || [];
+            if (!onSelectionChange) return;
+            onSelectionChange(selectedNodes.map((node) => node.id));
+        },
+        [onSelectionChange],
+    );
 
     return (
         <div className="tf-graph">
@@ -208,22 +245,29 @@ export function GraphView({ focusKey, data, onSelect }) {
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onNodeClick={onNodeClick}
+                onSelectionChange={onInternalSelectionChange}
                 nodeTypes={nodeTypes}
                 fitView
                 fitViewOptions={{ padding: 0.2 }}
+                selectionOnDrag
+                multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
+                panOnDrag
+                zoomOnScroll
+                zoomOnPinch
+                zoomOnDoubleClick
                 defaultEdgeOptions={{
                     type: 'smoothstep',
                     style: { strokeWidth: 2, stroke: isDark ? '#475569' : '#94a3b8' },
-                    markerEnd: { type: MarkerType.ArrowClosed, color: isDark ? '#475569' : '#94a3b8' }
+                    markerEnd: { type: MarkerType.ArrowClosed, color: isDark ? '#475569' : '#94a3b8' },
                 }}
             >
                 <Background color={isDark ? '#273244' : '#e5e7eb'} gap={20} />
-                <Controls position="bottom-right" />
+                <Controls position="bottom-left" showInteractive style={{ zIndex: 20 }} />
                 <MiniMap style={{ background: isDark ? '#0f172a' : '#ffffff' }} maskColor="rgba(0,0,0,0.2)" />
             </ReactFlow>
             <div className="graph-legend">
                 <div className="legend-item focus">Focus</div>
-                <div className="legend-item parent">Parent</div>
+                <div className="legend-item parent">Hierarchy</div>
                 <div className="legend-item link">Linked</div>
             </div>
             <style>{`
@@ -332,17 +376,20 @@ export function GraphView({ focusKey, data, onSelect }) {
 }
 
 function IssueNode({ data }) {
-    const { isDark } = useTheme();
     const kindLabel = {
         focus: 'Focus',
         parent: 'Parent',
         subtask: 'Subtask',
         sibling: 'Sibling',
-        linked: 'Linked'
-    }[data.kind] || 'Issue';
+        linked: 'Linked',
+    }[data.kind] || data.kind || 'Issue';
 
     const statusKey = (data.statusCategory || '').toLowerCase();
     const statusClass = statusKey === 'done' ? 'done' : statusKey === 'in progress' ? 'progress' : 'todo';
+
+    const showStatus = data.displayFields?.status !== false;
+    const showPriority = data.displayFields?.priority !== false;
+    const showAssignee = data.displayFields?.assignee !== false;
 
     return (
         <div className={`tf-node ${data.kind}`}>
@@ -354,9 +401,9 @@ function IssueNode({ data }) {
             </div>
             <div className="tf-summary">{data.summary || 'No summary'}</div>
             <div className="tf-meta">
-                <span className={`tf-badge status ${statusClass}`}>{data.status || 'Unknown'}</span>
-                {data.priority && <span className="tf-badge">{data.priority}</span>}
-                {data.assignee && <span className="tf-badge">{data.assignee}</span>}
+                {showStatus && <span className={`tf-badge status ${statusClass}`}>{data.status || 'Unknown'}</span>}
+                {showPriority && data.priority && <span className="tf-badge">{data.priority}</span>}
+                {showAssignee && data.assignee && <span className="tf-badge">{data.assignee}</span>}
             </div>
         </div>
     );
