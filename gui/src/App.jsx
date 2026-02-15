@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Layout } from './components/Layout';
 import { IssueList } from './components/IssueList';
 import { IssueTree } from './components/IssueTree';
@@ -11,7 +11,7 @@ import { SearchBar } from './components/SearchBar';
 import { ConfigPanel } from './components/ConfigPanel';
 import { SavedQueries } from './components/SavedQueries';
 import { system, issues as issuesApi, queries } from './api';
-import { List, GitMerge, LayoutDashboard, Share2, Bot, BrainCircuit } from 'lucide-react';
+import { List, GitMerge, LayoutDashboard, Share2, Bot, BrainCircuit, ChevronLeft, ChevronRight } from 'lucide-react';
 
 function App() {
     const [issues, setIssues] = useState([]);
@@ -24,6 +24,7 @@ function App() {
     // View Modes
     const [leftView, setLeftView] = useState('list'); // 'list', 'tree'
     const [rightView, setRightView] = useState('detail'); // 'detail', 'focus', 'graph', 'ai', 'advisor'
+    const [leftCollapsed, setLeftCollapsed] = useState(false);
     const [leftPanelLoading, setLeftPanelLoading] = useState(false);
     const [rightPanelLoading, setRightPanelLoading] = useState(false);
     const leftPanelTimer = useRef(null);
@@ -165,6 +166,35 @@ function App() {
         }
     };
 
+    const handleRemoteFilters = useCallback(async (filterPayload) => {
+        setLoading(true);
+        setFilteredIssues(null);
+        setActiveFilter(null);
+        try {
+            const params = { limit: 100 };
+            const projects = (filterPayload.projects || []).slice().sort();
+            const statuses = (filterPayload.statuses || []).slice().sort();
+            const priorities = (filterPayload.priorities || []).slice().sort();
+            const assignees = (filterPayload.assignees || []).slice().sort();
+            if (projects.length) params.projects = projects.join(',');
+            if (statuses.length) params.statuses = statuses.join(',');
+            if (priorities.length) params.priorities = priorities.join(',');
+            if (filterPayload.assigneeAny) {
+                params.assignee_any = true;
+            } else if (assignees.length) {
+                params.assignees = assignees.join(',');
+            }
+            const res = await issuesApi.list(params);
+            const nextIssues = res.data.issues || [];
+            setIssues(nextIssues);
+            setSelectedId((prev) => (prev && !nextIssues.find(i => i.key === prev) ? null : prev));
+        } catch (err) {
+            console.error("Failed to load filtered issues", err);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
     useEffect(() => {
         refreshIssues();
     }, []);
@@ -193,42 +223,55 @@ function App() {
             onOpenSettings={() => setShowConfig(true)}
         >
             <div className="split-pane">
-                <div className="left-pane">
+                <div className={`left-pane ${leftCollapsed ? 'collapsed' : ''}`}>
                     <div className="pane-header">
                         <div className="view-toggles">
+                            {!leftCollapsed && (
+                                <>
+                                    <button
+                                        className={leftView === 'list' ? 'active' : ''}
+                                        onClick={() => {
+                                            if (leftView !== 'list') {
+                                                triggerLeftPanel();
+                                                setLeftView('list');
+                                            }
+                                        }}
+                                        title="List View"
+                                    >
+                                        <List size={18} />
+                                    </button>
+                                    <button
+                                        className={leftView === 'tree' ? 'active' : ''}
+                                        onClick={() => {
+                                            if (leftView !== 'tree') {
+                                                triggerLeftPanel();
+                                                setLeftView('tree');
+                                            }
+                                        }}
+                                        title="Tree View"
+                                    >
+                                        <GitMerge size={18} />
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                        <div className="pane-actions">
+                            {!leftCollapsed && <span className="count-badge">{displayIssues.length}</span>}
                             <button
-                                className={leftView === 'list' ? 'active' : ''}
-                                onClick={() => {
-                                    if (leftView !== 'list') {
-                                        triggerLeftPanel();
-                                        setLeftView('list');
-                                    }
-                                }}
-                                title="List View"
+                                className="collapse-btn"
+                                onClick={() => setLeftCollapsed(prev => !prev)}
+                                title={leftCollapsed ? 'Expand left pane' : 'Collapse left pane'}
                             >
-                                <List size={18} />
-                            </button>
-                            <button
-                                className={leftView === 'tree' ? 'active' : ''}
-                                onClick={() => {
-                                    if (leftView !== 'tree') {
-                                        triggerLeftPanel();
-                                        setLeftView('tree');
-                                    }
-                                }}
-                                title="Tree View"
-                            >
-                                <GitMerge size={18} />
+                                {leftCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
                             </button>
                         </div>
-                        <span className="count-badge">{displayIssues.length}</span>
                     </div>
 
-                    <SearchBar onResults={handleSearchResults} />
+                    {!leftCollapsed && <SearchBar onResults={handleSearchResults} />}
 
-                    <SavedQueries onSelectQuery={handleQuerySelect} />
+                    {!leftCollapsed && <SavedQueries onSelectQuery={handleQuerySelect} />}
 
-                    {activeFilter && (
+                    {!leftCollapsed && activeFilter && (
                         <div className="active-filter">
                             <span className="filter-label">{activeFilter.label}</span>
                             <span className="filter-count">{activeFilter.count}</span>
@@ -243,17 +286,36 @@ function App() {
                                 <span>Loading…</span>
                             </div>
                         )}
-                        {leftView === 'list' ? (
-                            <IssueList
-                                issues={displayIssues}
-                                selectedId={selectedId}
-                                onSelect={setSelectedId}
-                            />
+                        {leftCollapsed ? (
+                            <div className="collapsed-rail">
+                                <div className="collapsed-count">{displayIssues.length}</div>
+                            <div className="collapsed-list scroll-area">
+                                {displayIssues.map((issue) => (
+                                    <button
+                                        key={issue.key}
+                                        className={`collapsed-item ${issue.key === selectedId ? 'active' : ''}`}
+                                            onClick={() => setSelectedId(issue.key)}
+                                            title={issue.summary || issue.key}
+                                        >
+                                            {issue.key}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                         ) : (
-                            <IssueTree
-                                selectedId={selectedId}
-                                onSelect={setSelectedId}
-                            />
+                            leftView === 'list' ? (
+                                <IssueList
+                                    issues={displayIssues}
+                                    selectedId={selectedId}
+                                    onSelect={setSelectedId}
+                                    onFiltersChange={handleRemoteFilters}
+                                />
+                            ) : (
+                                <IssueTree
+                                    selectedId={selectedId}
+                                    onSelect={setSelectedId}
+                                />
+                            )
                         )}
                     </div>
                 </div>
@@ -364,15 +426,85 @@ function App() {
 
             <style>{`
             .split-pane { display: flex; width: 100%; height: calc(100vh - 64px); gap: 16px; padding: 16px; }
-            .left-pane { width: 420px; border: 1px solid var(--border); border-radius: var(--radius-lg); display: flex; flex-direction: column; background: var(--bg-elevated); box-shadow: var(--shadow-sm); overflow: hidden; }
+            .left-pane { width: 420px; border: 1px solid var(--border); border-radius: var(--radius-lg); display: flex; flex-direction: column; background: var(--bg-elevated); box-shadow: var(--shadow-sm); overflow: visible; transition: width 0.25s ease; }
+            .left-pane.collapsed { width: 120px; overflow: hidden; }
             .right-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-elevated); border-radius: var(--radius-lg); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
-            .pane-header { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--bg-secondary); height: 44px; }
+            .pane-header { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--bg-secondary); height: 44px; position: sticky; top: 0; z-index: 15; }
             .view-toggles { display: flex; gap: 6px; flex-wrap: wrap; }
             .view-toggles button { border: 1px solid transparent; background: none; padding: 6px 10px; border-radius: 999px; cursor: pointer; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 600; transition: all 0.2s ease; }
             .view-toggles button:hover { background: var(--bg-primary); color: var(--text-primary); border-color: var(--border); }
             .view-toggles button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
             .count-badge { font-size: 0.75rem; background: var(--bg-primary); padding: 2px 10px; border-radius: 999px; color: var(--text-secondary); border: 1px solid var(--border); }
+            .pane-actions { display: flex; gap: 8px; align-items: center; }
+            .collapse-btn { border: 1px solid var(--border); background: var(--bg-primary); color: var(--text-secondary); border-radius: 999px; padding: 4px 6px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+            .collapse-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
             .pane-content { flex: 1; overflow: hidden; position: relative; animation: fadeUp 0.35s ease; }
+            .left-pane .pane-content { overflow: visible; min-height: 0; }
+            .right-pane .pane-content { overflow: hidden; }
+            .collapsed-rail {
+              display: flex;
+              flex-direction: column;
+              align-items: stretch;
+              gap: 10px;
+              padding: 10px 6px;
+              color: var(--text-secondary);
+              height: 100%;
+              background: radial-gradient(circle at top, rgba(59, 130, 246, 0.08), transparent 50%);
+            }
+            .collapsed-count {
+              font-size: 0.7rem;
+              text-align: center;
+              padding: 6px 0;
+              border: 1px solid var(--border);
+              border-radius: 999px;
+              background: var(--bg-primary);
+              color: var(--text-secondary);
+            }
+            .collapsed-list {
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+              overflow-y: auto;
+              padding-bottom: 6px;
+            }
+            .collapsed-item {
+              border: 1px solid var(--border);
+              background: var(--bg-primary);
+              color: var(--text-secondary);
+              border-radius: 10px;
+              padding: 6px 4px;
+              font-size: 0.72rem;
+              cursor: pointer;
+              text-align: center;
+              font-family: monospace;
+              letter-spacing: 0.02em;
+            }
+            .collapsed-item:hover {
+              border-color: var(--accent);
+              color: var(--accent);
+              background: var(--accent-soft);
+            }
+            .collapsed-item.active {
+              border-color: var(--accent);
+              color: var(--accent);
+              background: var(--accent-soft);
+            }
+            .scroll-area::-webkit-scrollbar {
+              width: 8px;
+              height: 8px;
+            }
+            .scroll-area::-webkit-scrollbar-thumb {
+              background: linear-gradient(180deg, var(--accent) 0%, var(--accent-soft) 100%);
+              border-radius: 999px;
+              border: 1px solid var(--border);
+            }
+            .scroll-area::-webkit-scrollbar-track {
+              background: transparent;
+            }
+            .scroll-area {
+              scrollbar-width: thin;
+              scrollbar-color: var(--accent) transparent;
+            }
             .pane-spinner {
               position: absolute;
               inset: 0;

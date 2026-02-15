@@ -310,6 +310,56 @@ class JiraClient:
             )
             return resp.json()
 
+    def list_assignable_users(
+        self,
+        project_key: str | None = None,
+        query: str | None = None,
+        max_results: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List assignable users for a project (or globally if project_key is None)."""
+        if not project_key and not query:
+            raise JiraClientError("project_key or query is required for assignable user search")
+        users: list[dict[str, Any]] = []
+        start_at = 0
+        page_size = 50
+
+        params: dict[str, Any] = {
+            "startAt": start_at,
+            "maxResults": page_size,
+        }
+        if project_key:
+            params["project"] = project_key
+        if query:
+            params["query"] = query
+
+        # Try v3 first, fallback to v2
+        while True:
+            params["startAt"] = start_at
+            try:
+                resp = self._request_with_retry(
+                    "GET", "/rest/api/3/user/assignable/search", params=params
+                )
+            except (JiraClientError, httpx.HTTPStatusError):
+                resp = self._request_with_retry(
+                    "GET", "/rest/api/2/user/assignable/search", params=params
+                )
+
+            data = resp.json() or []
+            if isinstance(data, dict):
+                # Some Jira instances return {"values": [...]} instead of a list
+                data = data.get("values", [])
+            if not data:
+                break
+
+            users.extend(data)
+            if len(users) >= max_results:
+                break
+            if len(data) < page_size:
+                break
+            start_at += len(data)
+
+        return users[:max_results]
+
     def fetch_with_hierarchy(self) -> list[dict[str, Any]]:
         """Fetch assigned issues + chase parent/subtask keys for complete hierarchy."""
         assigned = self.fetch_all_assigned()

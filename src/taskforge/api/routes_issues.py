@@ -39,6 +39,11 @@ async def list_issues(
     cursor: Optional[str] = Query(None, description="Jira nextPageToken for pagination"),
     updated_days: int = Query(30, ge=1, le=365, description="Fetch issues updated in last N days"),
     status: Optional[str] = Query(None, description="Filter by status (post-fetch)"),
+    assignees: Optional[str] = Query(None, description="Comma-separated assignees (id:accountId, name:Display Name, UNASSIGNED)"),
+    assignee_any: bool = Query(False, description="Ignore currentUser assignee filter"),
+    projects: Optional[str] = Query(None, description="Comma-separated project keys"),
+    statuses: Optional[str] = Query(None, description="Comma-separated statuses"),
+    priorities: Optional[str] = Query(None, description="Comma-separated priorities"),
 ):
     """List issues with cursor-based pagination, hard caps, and TTL caching.
     
@@ -46,7 +51,7 @@ async def list_issues(
     Uses POST /rest/api/3/search/jql as strict requirement for Jira Cloud.
     """
     # 1. Check Cache
-    cache_key = f"issues_l{limit}_c{cursor}_d{updated_days}_{status}"
+    cache_key = f"issues_l{limit}_c{cursor}_d{updated_days}_{status}_{assignees}_{assignee_any}_{projects}_{statuses}_{priorities}"
     cached = _get_cache(cache_key)
     if cached:
         return {**cached, "source": "cache"}
@@ -62,13 +67,83 @@ async def list_issues(
             return f"({base.strip()}) AND {clause} ORDER BY {order.strip()}"
         return f"({jql.strip()}) AND {clause}"
 
+    def _parse_list(value: str | None) -> list[str]:
+        if not value:
+            return []
+        return [v.strip() for v in value.split(",") if v.strip()]
+
+    def _quote(val: str) -> str:
+        return f'"{val.replace("\"", "\\\"")}"'
+
+    def _strip_current_user_assignee(jql: str) -> tuple[str, str]:
+        parts = re.split(r"\border\s+by\b", jql, flags=re.IGNORECASE, maxsplit=1)
+        base = parts[0]
+        order = parts[1] if len(parts) == 2 else ""
+        base = re.sub(r"(?i)\bassignee\s*=\s*currentuser\(\)\b", "", base)
+        base = re.sub(r"(?i)\bassignee\s+in\s*\(\s*currentuser\(\)\s*\)\b", "", base)
+        base = re.sub(r"(?i)\b(AND|OR)\b\s*$", "", base).strip()
+        base = re.sub(r"(?i)^\s*(AND|OR)\b", "", base).strip()
+        base = re.sub(r"\s{2,}", " ", base).strip()
+        return base, order.strip()
+
     base_jql = settings.jira_jql or "assignee=currentUser() ORDER BY updated DESC"
+    if assignee_any or _parse_list(assignees):
+        base_part, order_part = _strip_current_user_assignee(base_jql)
+        if not base_part:
+            base_part = f"updated >= -{updated_days}d"
+        base_jql = base_part
+        if order_part:
+            base_jql = f"{base_jql} ORDER BY {order_part}"
+
     jql_lower = base_jql.lower()
-    if "updated" not in jql_lower:
+    if "updated" not in jql_lower and not (assignee_any or _parse_list(assignees)):
         base_jql = _append_clause(base_jql, f"updated >= -{updated_days}d")
     if status:
         safe_status = status.replace('"', '\\"')
         base_jql = _append_clause(base_jql, f'status = "{safe_status}"')
+
+    # Multi-value filters
+    project_list = _parse_list(projects)
+    status_list = _parse_list(statuses)
+    priority_list = _parse_list(priorities)
+    assignee_list = _parse_list(assignees)
+
+    if project_list:
+        clause = "project in (" + ",".join(_quote(p) for p in project_list) + ")"
+        base_jql = _append_clause(base_jql, clause)
+
+    if status_list:
+        clause = "status in (" + ",".join(_quote(s) for s in status_list) + ")"
+        base_jql = _append_clause(base_jql, clause)
+
+    if priority_list:
+        clause = "priority in (" + ",".join(_quote(p) for p in priority_list) + ")"
+        base_jql = _append_clause(base_jql, clause)
+
+    if assignee_list and not assignee_any:
+        include_unassigned = any(a.upper() == "UNASSIGNED" for a in assignee_list)
+        ids: list[str] = []
+        names: list[str] = []
+        for raw in assignee_list:
+            if raw.upper() == "UNASSIGNED":
+                continue
+            if raw.startswith("id:"):
+                ids.append(raw[3:])
+            elif raw.startswith("name:"):
+                names.append(raw[5:])
+            else:
+                names.append(raw)
+        items = ids + names
+        clause_parts: list[str] = []
+        if items:
+            clause_parts.append("assignee in (" + ",".join(_quote(a) for a in items) + ")")
+        if include_unassigned:
+            clause_parts.append("assignee is EMPTY")
+        if clause_parts:
+            clause = " OR ".join(clause_parts)
+            if len(clause_parts) > 1:
+                clause = f"({clause})"
+            base_jql = _append_clause(base_jql, clause)
     
     # 3. Async Fetch with Retry
     import httpx
@@ -163,6 +238,83 @@ async def get_tree():
             tree_path = settings.output_path / "tasks_tree.json"
             tree_path.write_text(json.dumps(tree, indent=2, default=str), encoding="utf-8")
     return {"tree": tree}
+
+
+@router.get("/issues/assignees")
+async def list_assignees(
+    project: str | None = Query(None, description="Project key to limit assignable users"),
+):
+    """Return assignable users for a project or across cached projects."""
+    from taskforge.jira_client import JiraClient
+    from taskforge.storage import load_latest_issues
+
+    def _parse_list(value: str | None) -> list[str]:
+        if not value:
+            return []
+        return [v.strip() for v in value.split(",") if v.strip()]
+
+    cache_key = f"assignees_{project or 'all'}"
+    cached = _get_cache(cache_key, ttl=300)
+    if cached:
+        return {"assignees": cached, "source": "cache"}
+
+    project_keys: list[str] = []
+    if project:
+        project_keys = _parse_list(project)
+    else:
+        issues = _get_cache("issues_last", ttl=300) or load_latest_issues()
+        project_keys = sorted({(i.get("projectKey") or "") for i in issues if i.get("projectKey")})
+
+    if not project_keys:
+        # Fallback to visible assignees from cached issues
+        issues = _get_cache("issues_last", ttl=300) or load_latest_issues()
+        local_assignees = sorted({
+            (i.get("assignee") or "") for i in issues if i.get("assignee")
+        })
+        result = [{"displayName": a} for a in local_assignees]
+        return {
+            "assignees": result,
+            "source": "local",
+            "warning": "No project keys found. Run sync or select a project filter to load full assignable users.",
+        }
+
+    assignees: dict[str, dict] = {}
+    try:
+        with JiraClient() as client:
+            if not project_keys:
+                users = client.list_assignable_users()
+                for u in users:
+                    key = u.get("accountId") or u.get("name") or u.get("emailAddress") or u.get("displayName")
+                    if not key:
+                        continue
+                    assignees[key] = {
+                        "id": u.get("accountId") or u.get("name"),
+                        "displayName": u.get("displayName") or u.get("name") or u.get("emailAddress"),
+                        "email": u.get("emailAddress"),
+                        "active": u.get("active", True),
+                    }
+            else:
+                for pk in project_keys:
+                    users = client.list_assignable_users(project_key=pk)
+                    for u in users:
+                        key = u.get("accountId") or u.get("name") or u.get("emailAddress") or u.get("displayName")
+                        if not key:
+                            continue
+                        assignees[key] = {
+                            "id": u.get("accountId") or u.get("name"),
+                            "displayName": u.get("displayName") or u.get("name") or u.get("emailAddress"),
+                            "email": u.get("emailAddress"),
+                            "active": u.get("active", True),
+                        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to list assignees: {exc}")
+
+    result = sorted(
+        assignees.values(),
+        key=lambda a: (a.get("displayName") or "").lower(),
+    )
+    _set_cache(cache_key, result)
+    return {"assignees": result, "source": "live"}
 
 
 @router.get("/issues/{key}")

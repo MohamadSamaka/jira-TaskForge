@@ -30,6 +30,7 @@ export const issues = {
     get: (key) => api.get(`/issues/${key}`),
     focus: (key) => api.get(`/focus/${key}`),
     search: (jql, useCache = true) => api.get('/search', { params: { jql, use_cache: useCache } }),
+    assignees: (project) => api.get('/issues/assignees', { params: project ? { project } : {} }),
 };
 
 export const queries = {

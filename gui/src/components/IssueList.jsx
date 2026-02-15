@@ -1,17 +1,130 @@
 import React from 'react';
+import { issues as issuesApi } from '../api';
 import {
     CheckCircle2, Circle,
     ArrowUpCircle, ArrowDownCircle, MinusCircle
 } from 'lucide-react';
 
-export function IssueList({ issues, selectedId, onSelect }) {
+function MultiSelect({
+    id,
+    label,
+    options,
+    selected,
+    onChange,
+    placeholder,
+    exclusiveValue,
+    isOpen,
+    onOpenChange,
+}) {
+    const [localOpen, setLocalOpen] = React.useState(false);
+    const rootRef = React.useRef(null);
+    const open = typeof isOpen === 'boolean' ? isOpen : localOpen;
+
+    const setOpen = (next) => {
+        if (typeof isOpen === 'boolean') {
+            onOpenChange?.(next, id);
+        } else {
+            setLocalOpen(next);
+        }
+    };
+
+    const labelMap = React.useMemo(() => {
+        const map = {};
+        options.forEach(opt => { map[opt.value] = opt.label; });
+        return map;
+    }, [options]);
+
+    const displayValue = React.useMemo(() => {
+        if (!selected.length) return placeholder || 'Any';
+        const labels = selected.map(v => labelMap[v] || v);
+        if (labels.length === 1) return labels[0];
+        const first = labels[0];
+        return `${first} +${labels.length - 1}`;
+    }, [selected, labelMap, placeholder]);
+
+    React.useEffect(() => {
+        if (!open) return;
+        const handleClick = (event) => {
+            if (rootRef.current && !rootRef.current.contains(event.target)) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClick);
+        return () => document.removeEventListener('mousedown', handleClick);
+    }, [open]);
+
+    React.useEffect(() => {
+        if (typeof isOpen === 'boolean') {
+            setLocalOpen(isOpen);
+        }
+    }, [isOpen]);
+
+    const toggleValue = (value) => {
+        const isSelected = selected.includes(value);
+        let next = [];
+        if (isSelected) {
+            next = selected.filter(v => v !== value);
+        } else {
+            if (exclusiveValue && value === exclusiveValue) {
+                next = [exclusiveValue];
+            } else {
+                next = selected.filter(v => v !== exclusiveValue);
+                next = [...next, value];
+            }
+        }
+        onChange(next);
+    };
+
+    return (
+        <div className="multi-select" ref={rootRef}>
+            <button className="multi-btn" onClick={() => setOpen(!open)} type="button">
+                <span className="label">{label}</span>
+                <span className="value">{displayValue}</span>
+            </button>
+            {open && (
+                <div className="multi-menu">
+                    <button className="multi-clear" type="button" onClick={() => onChange([])}>
+                        Clear {label}
+                    </button>
+                    {options.map(opt => (
+                        <div
+                            key={opt.value}
+                            className="multi-option"
+                            onClick={() => toggleValue(opt.value)}
+                        >
+                            <input
+                                type="checkbox"
+                                checked={selected.includes(opt.value)}
+                                onClick={(event) => event.stopPropagation()}
+                                onChange={() => toggleValue(opt.value)}
+                            />
+                            <span>{opt.label}</span>
+                        </div>
+                    ))}
+                    {!options.length && (
+                        <div className="multi-option" style={{ opacity: 0.7 }}>
+                            No options
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+export function IssueList({ issues, selectedId, onSelect, onFiltersChange }) {
     const [filters, setFilters] = React.useState({
-        project: '',
-        status: '',
-        priority: '',
-        assignee: '',
+        projects: [],
+        statuses: [],
+        priorities: [],
+        assignees: [],
         search: ''
     });
+    const [assigneeOptions, setAssigneeOptions] = React.useState([]);
+    const [assigneeLoading, setAssigneeLoading] = React.useState(false);
+    const [assigneeError, setAssigneeError] = React.useState(null);
+    const initialized = React.useRef(false);
+    const [openMenu, setOpenMenu] = React.useState(null);
 
     const normalizeIssue = (issue) => {
         const fields = issue?.fields || {};
@@ -24,6 +137,11 @@ export function IssueList({ issues, selectedId, onSelect }) {
             fields.assignee?.name ||
             fields.assignee?.emailAddress ||
             null;
+        const assigneeId =
+            issue?.assigneeId ||
+            fields.assignee?.accountId ||
+            fields.assignee?.name ||
+            null;
         const projectKey = issue?.projectKey || fields.project?.key || '';
         const summary = issue?.summary || fields.summary || '';
         return {
@@ -34,6 +152,7 @@ export function IssueList({ issues, selectedId, onSelect }) {
             statusCategory,
             priority,
             assignee,
+            assigneeId,
         };
     };
 
@@ -42,24 +161,92 @@ export function IssueList({ issues, selectedId, onSelect }) {
         return issues.map(normalizeIssue);
     }, [issues]);
 
+    React.useEffect(() => {
+        let mounted = true;
+        const loadAssignees = async () => {
+            setAssigneeLoading(true);
+            setAssigneeError(null);
+            try {
+                const projectParam = (filters.projects || []).length
+                    ? filters.projects.join(',')
+                    : undefined;
+                const res = await issuesApi.assignees(projectParam);
+                const list = (res.data.assignees || []).map(a => ({
+                    value: a.id ? `id:${a.id}` : `name:${a.displayName}`,
+                    label: a.displayName
+                })).filter(a => a.label);
+                if (mounted) setAssigneeOptions(list);
+                if (res.data.warning && mounted) {
+                    setAssigneeError(res.data.warning);
+                }
+            } catch (err) {
+                if (mounted) setAssigneeError(err.response?.data?.detail || err.message);
+            } finally {
+                if (mounted) setAssigneeLoading(false);
+            }
+        };
+        loadAssignees();
+        return () => { mounted = false; };
+    }, [filters.projects]);
+
+    const assigneeValueToLabel = React.useMemo(() => {
+        const map = {};
+        assigneeOptions.forEach(a => { map[a.value] = a.label; });
+        map.UNASSIGNED = 'Unassigned';
+        map.__ANY__ = 'Any assignee';
+        return map;
+    }, [assigneeOptions]);
+
     // Extract unique options
     const options = React.useMemo(() => {
         if (!normalizedIssues.length) return { projects: [], statuses: [], priorities: [], assignees: [] };
         const projects = [...new Set(normalizedIssues.map(i => i.projectKey).filter(Boolean))].sort();
         const statuses = [...new Set(normalizedIssues.map(i => i.status).filter(Boolean))].sort();
         const priorities = [...new Set(normalizedIssues.map(i => i.priority).filter(Boolean))].sort();
-        const assignees = [...new Set(normalizedIssues.map(i => i.assignee || 'Unassigned'))].sort();
-        return { projects, statuses, priorities, assignees };
+        return { projects, statuses, priorities };
     }, [normalizedIssues]);
+
+    React.useEffect(() => {
+        if (!onFiltersChange) return;
+        if (!initialized.current) {
+            initialized.current = true;
+            return;
+        }
+        const assigneeAny = filters.assignees.includes('__ANY__');
+        const payload = {
+            projects: filters.projects,
+            statuses: filters.statuses,
+            priorities: filters.priorities,
+            assignees: assigneeAny ? [] : filters.assignees.filter(v => v !== '__ANY__'),
+            assigneeAny,
+        };
+        onFiltersChange(payload);
+    }, [filters.projects, filters.statuses, filters.priorities, filters.assignees, onFiltersChange]);
 
     // Apply filters
     const filteredIssues = React.useMemo(() => {
         if (!normalizedIssues.length) return [];
         return normalizedIssues.filter(i => {
-            if (filters.project && i.projectKey !== filters.project) return false;
-            if (filters.status && i.status !== filters.status) return false;
-            if (filters.priority && i.priority !== filters.priority) return false;
-            if (filters.assignee && (i.assignee || 'Unassigned') !== filters.assignee) return false;
+            if (filters.projects.length && !filters.projects.includes(i.projectKey)) return false;
+            if (filters.statuses.length && !filters.statuses.includes(i.status)) return false;
+            if (filters.priorities.length && !filters.priorities.includes(i.priority)) return false;
+            if (filters.assignees.length && !filters.assignees.includes('__ANY__')) {
+                const selected = filters.assignees;
+                const hasUnassigned = selected.includes('UNASSIGNED');
+                const hasAssignee = Boolean(i.assignee || i.assigneeId);
+                if (!hasAssignee && hasUnassigned) return true;
+                if (!hasAssignee && !hasUnassigned) return false;
+                const assigneeName = i.assignee || '';
+                const assigneeId = i.assigneeId || '';
+                const match = selected.some((value) => {
+                    if (value === 'UNASSIGNED') return false;
+                    if (value.startsWith('id:')) return assigneeId === value.slice(3);
+                    if (value.startsWith('name:')) return assigneeName === value.slice(5);
+                    const label = assigneeValueToLabel[value];
+                    return assigneeName === (label || value);
+                });
+                if (!match) return false;
+            }
             if (filters.search) {
                 const term = filters.search.toLowerCase();
                 const match = (i.key || '').toLowerCase().includes(term) ||
@@ -70,93 +257,126 @@ export function IssueList({ issues, selectedId, onSelect }) {
         });
     }, [normalizedIssues, filters]);
 
-    if (!issues || issues.length === 0) {
-        return <div className="empty-state">No issues found</div>;
-    }
+    const emptyLabel = normalizedIssues.length ? 'No matches via filter' : 'No issues found';
 
     return (
         <div className="issue-list-container">
             <div className="filter-bar">
-                <input
-                    type="text"
-                    placeholder="Search visible..."
-                    className="filter-input search"
-                    value={filters.search}
-                    onChange={e => setFilters({ ...filters, search: e.target.value })}
-                />
-                <select
-                    className="filter-select"
-                    value={filters.project}
-                    onChange={e => setFilters({ ...filters, project: e.target.value })}
-                >
-                    <option value="">All Projects</option>
-                    {options.projects.map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-                <select
-                    className="filter-select"
-                    value={filters.status}
-                    onChange={e => setFilters({ ...filters, status: e.target.value })}
-                >
-                    <option value="">All Statuses</option>
-                    {options.statuses.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-                <select
-                    className="filter-select"
-                    value={filters.priority}
-                    onChange={e => setFilters({ ...filters, priority: e.target.value })}
-                >
-                    <option value="">All Priorities</option>
-                    {options.priorities.map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-                <select
-                    className="filter-select"
-                    value={filters.assignee}
-                    onChange={e => setFilters({ ...filters, assignee: e.target.value })}
-                >
-                    <option value="">All Assignees</option>
-                    {options.assignees.map(a => <option key={a} value={a}>{a}</option>)}
-                </select>
-                {(filters.project || filters.status || filters.priority || filters.assignee || filters.search) && (
-                    <button className="clear-btn" onClick={() => setFilters({ project: '', status: '', priority: '', assignee: '', search: '' })}>
-                        Clear
-                    </button>
-                )}
+                <div className="filter-row">
+                    <div className="search-wrap">
+                        <span className="filter-label">Search</span>
+                        <input
+                            type="text"
+                            placeholder="Key, summary, or text..."
+                            className="filter-input search"
+                            value={filters.search}
+                            onChange={e => setFilters({ ...filters, search: e.target.value })}
+                        />
+                    </div>
+                    <div className="filter-actions">
+                        {assigneeLoading && <span className="mini-spinner" title="Loading assignees" />}
+                        {assigneeError && <span className="assignee-warn">Assignees unavailable</span>}
+                        {(filters.projects.length || filters.statuses.length || filters.priorities.length || filters.assignees.length || filters.search) && (
+                            <button
+                                className="clear-btn"
+                                onClick={() => {
+                                    setFilters({ projects: [], statuses: [], priorities: [], assignees: [], search: '' });
+                                    setOpenMenu(null);
+                                }}
+                            >
+                                Clear filters
+                            </button>
+                        )}
+                    </div>
+                </div>
+                <div className="filter-row">
+                    <MultiSelect
+                        id="project"
+                        label="Project"
+                        options={options.projects.map(p => ({ value: p, label: p }))}
+                        selected={filters.projects}
+                        onChange={(values) => setFilters({ ...filters, projects: values })}
+                        placeholder="Any project"
+                        isOpen={openMenu === 'project'}
+                        onOpenChange={(next) => setOpenMenu(next ? 'project' : null)}
+                    />
+                    <MultiSelect
+                        id="status"
+                        label="Status"
+                        options={options.statuses.map(s => ({ value: s, label: s }))}
+                        selected={filters.statuses}
+                        onChange={(values) => setFilters({ ...filters, statuses: values })}
+                        placeholder="Any status"
+                        isOpen={openMenu === 'status'}
+                        onOpenChange={(next) => setOpenMenu(next ? 'status' : null)}
+                    />
+                    <MultiSelect
+                        id="priority"
+                        label="Priority"
+                        options={options.priorities.map(p => ({ value: p, label: p }))}
+                        selected={filters.priorities}
+                        onChange={(values) => setFilters({ ...filters, priorities: values })}
+                        placeholder="Any priority"
+                        isOpen={openMenu === 'priority'}
+                        onOpenChange={(next) => setOpenMenu(next ? 'priority' : null)}
+                    />
+                    <MultiSelect
+                        id="assignee"
+                        label="Assignee"
+                        options={[
+                            { value: '__ANY__', label: 'Any assignee' },
+                            { value: 'UNASSIGNED', label: 'Unassigned' },
+                            ...assigneeOptions
+                        ]}
+                        selected={filters.assignees}
+                        onChange={(values) => setFilters({ ...filters, assignees: values })}
+                        placeholder="Me (default)"
+                        exclusiveValue="__ANY__"
+                        isOpen={openMenu === 'assignee'}
+                        onOpenChange={(next) => setOpenMenu(next ? 'assignee' : null)}
+                    />
+                </div>
             </div>
 
-            <div className="issue-list-scroll">
-                <table className="table">
-                    <thead>
-                        <tr>
-                            <th width="40"></th>
-                            <th width="120">Key</th>
-                            <th>Summary</th>
-                            <th width="100">Status</th>
-                            <th width="100">Priority</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {filteredIssues.map(issue => (
-                            <tr
-                                key={issue.key}
-                                className={issue.key === selectedId ? 'selected' : ''}
-                                onClick={() => onSelect(issue.key)}
-                            >
-                                <td className="icon-cell">
-                                    <StatusIcon category={issue.statusCategory} />
-                                </td>
-                                <td className="key-cell">{issue.key}</td>
-                                <td className="summary-cell">
-                                    <div className="summary-text">{issue.summary}</div>
-                                </td>
-                                <td><StatusBadge status={issue.status} category={issue.statusCategory} /></td>
-                                <td><PriorityBadge priority={issue.priority} /></td>
-                            </tr>
-                        ))}
-                        {filteredIssues.length === 0 && (
-                            <tr><td colSpan="5" className="empty-state">No matches via filter</td></tr>
-                        )}
-                    </tbody>
-                </table>
+            <div className="issue-list-scroll scroll-area">
+                <div className="issue-table">
+                    <div className="issue-row header">
+                        <div className="cell icon"></div>
+                        <div className="cell key">Key</div>
+                        <div className="cell summary">Summary</div>
+                    </div>
+                    {filteredIssues.map(issue => (
+                        <div
+                            key={issue.key}
+                            className={`issue-row ${issue.key === selectedId ? 'selected' : ''}`}
+                            onClick={() => onSelect(issue.key)}
+                            role="button"
+                            tabIndex={0}
+                        >
+                            <div className="cell icon">
+                                <StatusIcon category={issue.statusCategory} />
+                            </div>
+                            <div className="cell key">{issue.key}</div>
+                            <div className="cell summary">
+                                <div className="summary-main">{issue.summary}</div>
+                                <div className="summary-meta">
+                                    <div className="summary-meta-left">
+                                        <span>{issue.projectKey || 'No project'}</span>
+                                        <span className="dot" aria-hidden="true">&bull;</span>
+                                        <span>{issue.assignee || 'Unassigned'}</span>
+                                    </div>
+                                    <div className="summary-badges">
+                                        <StatusBadge status={issue.status} category={issue.statusCategory} />
+                                        <PriorityBadge priority={issue.priority} />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    ))}
+                    {filteredIssues.length === 0 && (
+                        <div className="empty-state">{emptyLabel}</div>
+                    )}
+                </div>
             </div>
 
             <style>{`
@@ -164,16 +384,47 @@ export function IssueList({ issues, selectedId, onSelect }) {
           height: 100%;
           display: flex;
           flex-direction: column;
+          min-height: 0;
         }
         .filter-bar {
             padding: 10px 12px;
             background: var(--bg-secondary);
             border-bottom: 1px solid var(--border);
             display: flex;
-            gap: 8px;
+            gap: 10px;
+            flex-direction: column;
+            overflow: visible;
+            align-items: stretch;
+            position: sticky;
+            top: 0;
+            z-index: 30;
+        }
+        .filter-row {
+            display: flex;
+            gap: 10px;
             flex-wrap: wrap;
-            overflow-x: hidden;
             align-items: center;
+            justify-content: space-between;
+        }
+        .filter-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            letter-spacing: 0.08em;
+            font-weight: 700;
+            margin-right: 8px;
+        }
+        .search-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+            min-width: 220px;
+        }
+        .filter-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         .filter-input, .filter-select {
             padding: 6px 10px;
@@ -183,8 +434,87 @@ export function IssueList({ issues, selectedId, onSelect }) {
             color: var(--text-primary);
             font-size: 0.82rem;
         }
+        .mini-spinner {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            animation: spin 0.8s linear infinite;
+        }
+        .assignee-warn {
+            font-size: 0.75rem;
+            color: #ef4444;
+        }
         .filter-input.search {
-            width: 140px;
+            flex: 1;
+            min-width: 180px;
+        }
+        .multi-select {
+            position: relative;
+        }
+        .multi-btn {
+            border: 1px solid var(--border);
+            background: var(--bg-elevated);
+            color: var(--text-primary);
+            padding: 6px 10px;
+            border-radius: 999px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .multi-btn .label {
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.65rem;
+            letter-spacing: 0.08em;
+            color: var(--text-secondary);
+        }
+        .multi-btn .value {
+            white-space: nowrap;
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .multi-menu {
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            min-width: 220px;
+            max-height: 260px;
+            overflow-y: auto;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: var(--shadow-md);
+            padding: 8px;
+            z-index: 50;
+        }
+        .multi-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .multi-option:hover {
+            background: var(--bg-secondary);
+        }
+        .multi-clear {
+            width: 100%;
+            text-align: left;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 6px 8px;
+            margin-bottom: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            color: var(--text-secondary);
         }
         .clear-btn {
             background: none;
@@ -198,52 +528,103 @@ export function IssueList({ issues, selectedId, onSelect }) {
           flex: 1;
           overflow-y: auto;
           animation: fadeUp 0.3s ease;
+          min-height: 0;
+          position: relative;
+          z-index: 1;
+          overflow-x: hidden;
         }
-        .table {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 0.9rem;
+        .issue-table {
+          display: flex;
+          flex-direction: column;
         }
-        .table th {
-          text-align: left;
-          padding: 8px 12px;
+        .issue-row {
+          display: grid;
+          grid-template-columns: 28px 100px minmax(0, 1fr);
+          gap: 10px;
+          padding: 10px 12px;
           border-bottom: 1px solid var(--border);
-          color: var(--text-secondary);
-          background: var(--bg-secondary);
-          position: sticky;
-          top: 0;
-          z-index: 10;
-        }
-        .table td {
-          padding: 8px 12px;
-          border-bottom: 1px solid var(--border);
+          align-items: center;
           cursor: pointer;
         }
-        .table tr:hover {
+        .issue-row:hover {
           background: var(--bg-secondary);
         }
-        .table tr.selected {
+        .issue-row.selected {
           background: var(--accent-soft);
           border-left: 2px solid var(--accent);
         }
-        .key-cell {
+        .issue-row.header {
+          position: sticky;
+          top: 0;
+          z-index: 10;
+          background: var(--bg-secondary);
+          font-size: 0.75rem;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: var(--text-secondary);
+          font-weight: 700;
+          cursor: default;
+        }
+        .issue-row.header .cell.key,
+        .issue-row.header .cell.summary {
+          color: var(--text-secondary);
+          font-family: inherit;
+          font-weight: 700;
+        }
+        .issue-row.header:hover {
+          background: var(--bg-secondary);
+        }
+        .cell {
+          min-width: 0;
+        }
+        .cell.icon {
+          text-align: center;
+        }
+        .cell.key {
           font-family: monospace;
           color: var(--accent);
-          font-weight: 500;
+          font-weight: 600;
         }
-        .summary-text {
-          white-space: nowrap;
+        .summary-main {
+          font-size: 0.92rem;
+          color: var(--text-primary);
+          line-height: 1.2;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
           overflow: hidden;
-          text-overflow: ellipsis;
-          max-width: 400px;
         }
-        .icon-cell {
-          text-align: center;
+        .summary-meta {
+          margin-top: 4px;
+          font-size: 0.75rem;
+          color: var(--text-secondary);
+          display: flex;
+          gap: 10px;
+          align-items: center;
+          justify-content: space-between;
+          flex-wrap: wrap;
+        }
+        .summary-meta-left {
+          display: inline-flex;
+          gap: 6px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .summary-meta-left .dot {
+          opacity: 0.6;
+        }
+        .summary-badges {
+          display: inline-flex;
+          gap: 6px;
+          align-items: center;
         }
         .empty-state {
           padding: 40px;
           text-align: center;
           color: var(--text-secondary);
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
         }
       `}</style>
         </div>

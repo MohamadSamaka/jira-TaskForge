@@ -244,6 +244,11 @@ def normalize_issue(raw: dict[str, Any]) -> dict[str, Any]:
             if isinstance(assignee_raw, dict)
             else _safe_str(assignee_raw)
         ) if assignee_raw else None,
+        "assigneeId": (
+            (assignee_raw.get("accountId") or assignee_raw.get("name"))
+            if isinstance(assignee_raw, dict)
+            else None
+        ),
         "created": fields.get("created"),
         "updated": fields.get("updated"),
         "dueDate": fields.get("duedate"),
