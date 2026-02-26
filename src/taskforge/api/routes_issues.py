@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 import re
 
 router = APIRouter()
@@ -28,6 +29,27 @@ def _get_cache(key: str, ttl: int = 60) -> Any | None:
 def _set_cache(key: str, data: Any):
     _TTL_CACHE[key] = (time.time(), data)
 
+
+def _strip_description(issue: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of issue with description fields cleared."""
+    if not isinstance(issue, dict):
+        return issue
+    if "description_plain" not in issue and "description_raw" not in issue:
+        return issue
+    trimmed = dict(issue)
+    trimmed["description_plain"] = None
+    trimmed["description_raw"] = None
+    return trimmed
+
+
+def _strip_descriptions(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_strip_description(issue) for issue in issues]
+
+
+class IssueKeysRequest(BaseModel):
+    keys: list[str] = Field(default_factory=list)
+    include_descriptions: bool = True
+
 # Global Semaphore for Jira Concurrency
 import asyncio
 _JIRA_SEMAPHORE = asyncio.Semaphore(3)
@@ -44,6 +66,7 @@ async def list_issues(
     projects: Optional[str] = Query(None, description="Comma-separated project keys"),
     statuses: Optional[str] = Query(None, description="Comma-separated statuses"),
     priorities: Optional[str] = Query(None, description="Comma-separated priorities"),
+    include_descriptions: bool = Query(True, description="Include description fields"),
 ):
     """List issues with cursor-based pagination, hard caps, and TTL caching.
     
@@ -51,7 +74,10 @@ async def list_issues(
     Uses POST /rest/api/3/search/jql as strict requirement for Jira Cloud.
     """
     # 1. Check Cache
-    cache_key = f"issues_l{limit}_c{cursor}_d{updated_days}_{status}_{assignees}_{assignee_any}_{projects}_{statuses}_{priorities}"
+    cache_key = (
+        f"issues_l{limit}_c{cursor}_d{updated_days}_{status}_{assignees}_{assignee_any}_"
+        f"{projects}_{statuses}_{priorities}_{include_descriptions}"
+    )
     cached = _get_cache(cache_key)
     if cached:
         return {**cached, "source": "cache"}
@@ -162,10 +188,26 @@ async def list_issues(
                     try:
                         # STRICT: Jira Cloud requires POST /rest/api/3/search/jql 
                         # and strictly forbids 'startAt'. Must use 'nextPageToken'.
+                        fields = [
+                            "summary",
+                            "status",
+                            "priority",
+                            "assignee",
+                            "created",
+                            "updated",
+                            "duedate",
+                            "parent",
+                            "subtasks",
+                            "issuelinks",
+                            "issuetype",
+                            "project",
+                        ]
+                        if include_descriptions:
+                            fields.append("description")
                         payload = {
                             "jql": base_jql,
                             "maxResults": min(limit, 100),
-                            "fields": ["summary","status","priority","assignee","created","updated","duedate","parent","issuetype","description","project"]
+                            "fields": fields,
                         }
                         
                         if cursor:
@@ -194,6 +236,8 @@ async def list_issues(
 
         raw_issues = data.get("issues", [])
         issues = normalize_issues(raw_issues)
+        if not include_descriptions:
+            issues = _strip_descriptions(issues)
         total = data.get("total", 0)
         next_token = data.get("nextPageToken")
         
@@ -327,6 +371,68 @@ async def get_issue(key: str):
     if not issue:
         raise HTTPException(status_code=404, detail=f"Issue {key} not found in cache")
     return issue
+
+
+@router.post("/issues/by-keys")
+async def get_issues_by_keys(payload: IssueKeysRequest):
+    """Batch fetch issues by key with cache-first lookup and live fallback.
+
+    Used by the task graph builder to avoid N+1 issue fetches when expanding
+    recursive parent/subtask/link relationships.
+    """
+    requested_keys = []
+    seen: set[str] = set()
+    for raw in payload.keys:
+        key = (raw or "").strip().upper()
+        if key and key not in seen:
+            requested_keys.append(key)
+            seen.add(key)
+
+    if not requested_keys:
+        return {"issues": [], "missing": []}
+
+    from taskforge.storage import load_latest_issues
+    from taskforge.jira_client import JiraClient
+    from taskforge.normalizer import normalize_issues
+
+    cache_issues = _get_cache("issues_last", ttl=300) or load_latest_issues()
+    by_key = {i.get("key", "").upper(): i for i in cache_issues if i.get("key")}
+
+    found: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
+    for key in requested_keys:
+        issue = by_key.get(key)
+        if not issue:
+            missing.append(key)
+            continue
+        if payload.include_descriptions and not issue.get("description_plain") and not issue.get("description_raw"):
+            # Refresh from Jira when descriptions are requested and cache looks stripped.
+            missing.append(key)
+            continue
+        found[key] = issue
+
+    if missing:
+        try:
+            with JiraClient() as client:
+                batch_size = 50
+                for i in range(0, len(missing), batch_size):
+                    batch = missing[i : i + batch_size]
+                    jql = "key in (" + ",".join(f'"{k}"' for k in batch) + ")"
+                    data = client._search_issues(jql, start_at=0, max_results=len(batch))
+                    normalized = normalize_issues(data.get("issues", []))
+                    for issue in normalized:
+                        issue_key = (issue.get("key") or "").upper()
+                        if issue_key:
+                            found[issue_key] = issue
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to fetch issues by keys: {exc}")
+
+    ordered = [found[k] for k in requested_keys if k in found]
+    if not payload.include_descriptions:
+        ordered = _strip_descriptions(ordered)
+
+    unresolved = [k for k in requested_keys if k not in found]
+    return {"issues": ordered, "missing": unresolved}
 
 
 @router.get("/focus/{key}")

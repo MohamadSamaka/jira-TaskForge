@@ -28,6 +28,8 @@ export const issues = {
     list: (params) => api.get('/issues', { params }),
     tree: () => api.get('/issues/tree'),
     get: (key) => api.get(`/issues/${key}`),
+    byKeys: (keys, includeDescriptions = true) =>
+        api.post('/issues/by-keys', { keys, include_descriptions: includeDescriptions }),
     focus: (key) => api.get(`/focus/${key}`),
     search: (jql, useCache = true) => api.get('/search', { params: { jql, use_cache: useCache } }),
     assignees: (project) => api.get('/issues/assignees', { params: project ? { project } : {} }),
